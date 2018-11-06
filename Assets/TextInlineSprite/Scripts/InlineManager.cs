@@ -1,282 +1,578 @@
-﻿/// ========================================================
-/// file：InlineManager.cs
-/// brief：
-/// author： coding2233
-/// date：
-/// version：v1.0
-/// ========================================================
-
+﻿#define EMOJI_RUNTIME
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using System;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
-public class InlineManager : MonoBehaviour {
-
-    //所有的精灵消息
-    public Dictionary<int, Dictionary<string, SpriteInforGroup>> _IndexSpriteInfo=new Dictionary<int, Dictionary<string, SpriteInforGroup>>();
-    //绘制图集的索引
-    private Dictionary<int, SpriteGraphicInfo> _IndexSpriteGraphic = new Dictionary<int, SpriteGraphicInfo>();
-    //绘制的模型数据索引
-    private Dictionary<int, Dictionary<InlineText, MeshInfo>> _TextMeshInfo = new Dictionary<int, Dictionary<InlineText, MeshInfo>>();
-    //静态表情
-    [SerializeField]
-    private bool _IsStatic;
-    //动画速度
-    [SerializeField]
-    [Range(1,10)]
-    private float _AnimationSpeed = 5.0f;
-	
-	// Use this for initialization
-	void OnEnable()
-    {
-        Initialize();
-    }
-
-    // Update is called once per frame
-    void Update () {
-        //动态表情
-        if(!_IsStatic)
-            DrawSpriteAnimation();
-    }
-   
-    #region 初始化
-    void Initialize()
-    {
-        SpriteGraphic[] _spriteGraphic = GetComponentsInChildren<SpriteGraphic>();
-        for (int i = 0; i < _spriteGraphic.Length; i++)
-        {
-            SpriteAsset _spriteAsset = _spriteGraphic[i].m_spriteAsset;
-            if (!_IndexSpriteGraphic.ContainsKey(_spriteAsset.ID)&&!_IndexSpriteInfo.ContainsKey(_spriteAsset.ID))
-            {
-                SpriteGraphicInfo _spriteGraphicInfo = new SpriteGraphicInfo()
-                {
-                    _SpriteGraphic = _spriteGraphic[i],
-                    _Mesh = new Mesh(),
-                };
-                _IndexSpriteGraphic.Add(_spriteAsset.ID, _spriteGraphicInfo);
-
-                Dictionary<string, SpriteInforGroup> _spriteGroup = new Dictionary<string, SpriteInforGroup>();
-                foreach (var item in _spriteAsset.listSpriteGroup)
-                {
-                    if (!_spriteGroup.ContainsKey(item.tag) && item .listSpriteInfor!=null&& item.listSpriteInfor.Count > 0)
-                        _spriteGroup.Add(item.tag, item);
-                }
-                _IndexSpriteInfo.Add(_spriteAsset.ID, _spriteGroup);
-                _TextMeshInfo.Add(_spriteAsset.ID, new Dictionary<InlineText, MeshInfo>());
-            }              
-        }
-    }
-    #endregion
-
-    public void UpdateTextInfo(int _id,InlineText _key, List<SpriteTagInfo> _value)
-    {
-        if (!_IndexSpriteGraphic.ContainsKey(_id)||!_TextMeshInfo.ContainsKey(_id)|| _value.Count<=0)
-            return;
-        int _spriteTagCount = _value.Count;
-        Vector3 _textPos = _key.transform.position;
-        Vector3 _spritePos = _IndexSpriteGraphic[_id]._SpriteGraphic.transform.position;
-        Vector3 _disPos = (_textPos - _spritePos)*(1.0f/ _key.pixelsPerUnit);
-        //新增摄像机模式的位置判断
-        if (_key.canvas != null)
-        {
-            if (_key.canvas.renderMode != RenderMode.ScreenSpaceOverlay)
-            {
-                Vector3 _scale = _key.canvas.transform.localScale;
-                _disPos = new Vector3(_disPos.x / _scale.x, _disPos.y / _scale.y, _disPos.z / _scale.z);
-            }
-        }
-
-        MeshInfo _meshInfo = new MeshInfo();
-        _meshInfo._Tag = new string[_spriteTagCount];
-        _meshInfo._Vertices = new Vector3[_spriteTagCount * 4];
-        _meshInfo._UV = new Vector2[_spriteTagCount * 4];
-        _meshInfo._Triangles = new int[_spriteTagCount * 6];
-        for (int i = 0; i < _value.Count; i++)
-        {
-            int m = i * 4;
-            //标签
-            _meshInfo._Tag[i] = _value[i]._Tag;
-            //顶点位置
-            _meshInfo._Vertices[m + 0] = _value[i]._Pos[0]+ _disPos;
-            _meshInfo._Vertices[m + 1] = _value[i]._Pos[1] + _disPos;
-            _meshInfo._Vertices[m + 2] = _value[i]._Pos[2] + _disPos;
-            _meshInfo._Vertices[m + 3] = _value[i]._Pos[3] + _disPos;
-            //uv
-            _meshInfo._UV[m + 0] = _value[i]._UV[0];
-            _meshInfo._UV[m + 1] = _value[i]._UV[1];
-            _meshInfo._UV[m + 2] = _value[i]._UV[2];
-            _meshInfo._UV[m + 3] = _value[i]._UV[3];
-        }
-        if (_TextMeshInfo[_id].ContainsKey(_key))
-        {
-            MeshInfo _oldMeshInfo = _TextMeshInfo[_id][_key];
-            if (!_meshInfo.Equals(_oldMeshInfo))
-                _TextMeshInfo[_id][_key] = _meshInfo;
-        }
-        else
-            _TextMeshInfo[_id].Add(_key, _meshInfo);
-        
-        //更新图片
-        DrawSprites(_id);
-    }
-
-	/// <summary>
-	/// 移除文本 
-	/// </summary>
-	/// <param name="_id"></param>
-	/// <param name="_key"></param>
-    public void RemoveTextInfo(int _id,InlineText _key)
-    {
-        if (!_TextMeshInfo.ContainsKey(_id)|| !_TextMeshInfo[_id].ContainsKey(_key))
-            return;
-	    _TextMeshInfo[_id].Remove(_key);
-        //更新图片
-        DrawSprites(_id);
-    }
-
-    #region 播放动态表情
-    float _animationTime = 0.0f;
-    int _AnimationIndex = 0;
-    private void DrawSpriteAnimation()
-    {
-        _animationTime += Time.deltaTime* _AnimationSpeed;
-        if (_animationTime >= 1.0f)
-        {
-            _AnimationIndex++;
-            //绘制表情
-            foreach (var item in _IndexSpriteGraphic)
-            {
-                if (item.Value._SpriteGraphic.m_spriteAsset._IsStatic)
-                    continue;
-                if (!_TextMeshInfo.ContainsKey(item.Key) || _TextMeshInfo[item.Key].Count <= 0)
-                    continue;
-
-                //Mesh _mesh = _IndexSpriteGraphic[item.Key]._Mesh;
-                Dictionary<InlineText, MeshInfo> _data = _TextMeshInfo[item.Key];
-                foreach (var item02 in _data)
-                {
-                    for (int i = 0; i < item02.Value._Tag.Length; i++)
-                    {
-                        List<SpriteInfor> _listSpriteInfo = _IndexSpriteInfo[item.Key][item02.Value._Tag[i]].listSpriteInfor;
-                        if (_listSpriteInfo.Count <= 1)
-                            continue;
-                        int _index = _AnimationIndex % _listSpriteInfo.Count;
-                        
-                        int m = i * 4;
-                        item02.Value._UV[m + 0] = _listSpriteInfo[_index].uv[0];
-                        item02.Value._UV[m + 1] = _listSpriteInfo[_index].uv[1];
-                        item02.Value._UV[m + 2] = _listSpriteInfo[_index].uv[2];
-                        item02.Value._UV[m + 3] = _listSpriteInfo[_index].uv[3];
-                        
-                    }
-                }
-               // _IndexSpriteGraphic[item.Key]._Mesh = _mesh;
-                DrawSprites(item.Key);
-            }
-
-            _animationTime = 0.0f;
-        }
-     
-    }
-    #endregion
-
-	/// <summary>
-	/// 清除所有的精灵
-	/// </summary>
-	public void ClearAllSprites()
+namespace EmojiUI
+{
+	public class InlineManager : MonoBehaviour
 	{
-		Dictionary<int, Dictionary<InlineText, MeshInfo>> _temp = new Dictionary<int, Dictionary<InlineText, MeshInfo>>();
-		foreach (var item in _TextMeshInfo)
-			_temp[item.Key] = new Dictionary<InlineText, MeshInfo>();
-		_TextMeshInfo = _temp;
+		private readonly List<SpriteAsset> _sharedAtlases = new List<SpriteAsset>();
 
-		foreach (var item in _IndexSpriteGraphic)
-			DrawSprites(item.Key);
+		private readonly Dictionary<string, SpriteInfoGroup> _alltags = new Dictionary<string, SpriteInfoGroup>();
+
+		private readonly Dictionary<string, KeyValuePair<SpriteAsset, SpriteInfoGroup>> _spritemap = new Dictionary<string, KeyValuePair<SpriteAsset, SpriteInfoGroup>>();
+
+		private IEmojiRender _render;
+
+		public List<string> PreparedAtlas = new List<string>();
+
+		public bool HasInit { get; private set; }
+
+#if UNITY_EDITOR
+		[SerializeField]
+		private bool _openDebug;
+		public bool OpenDebug
+		{
+			get
+			{
+				return _openDebug;
+			}
+			set
+			{
+				if (_openDebug != value)
+				{
+					_openDebug = value;
+					if (Application.isPlaying)
+					{
+						if (value)
+						{
+							EmojiTools.StartDumpGUI();
+						}
+						else
+						{
+							EmojiTools.EndDumpGUI();
+						}
+					}
+				}
+			}
+		}
+
+		private List<SpriteAsset> _unityallAtlases;
+
+		private List<string> _lostAssets;
+#endif
+		[SerializeField]
+		private float _animationspeed = 5f;
+		public float AnimationSpeed
+		{
+			get
+			{
+				return _animationspeed;
+			}
+			set
+			{
+				if (_render != null)
+				{
+					_render.Speed = value;
+				}
+				_animationspeed = value;
+			}
+		}
+
+		[SerializeField]
+		private EmojiRenderType _renderType = EmojiRenderType.RenderUnit;
+		public EmojiRenderType RenderType
+		{
+			get
+			{
+				return _renderType;
+			}
+			set
+			{
+				if (_renderType != value)
+				{
+					_renderType = value;
+					InitRender();
+				}
+			}
+		}
+
+
+		void Awake()
+		{
+#if UNITY_EDITOR
+			if (OpenDebug)
+			{
+				EmojiTools.StartDumpGUI();
+			}
+#endif
+
+			EmojiTools.BeginSample("Emoji_Init");
+			Initialize();
+			EmojiTools.EndSample();
+
+			EmojiTools.AddUnityMemory(this);
+		}
+
+		void Initialize()
+		{
+			HasInit = true;
+#if UNITY_EDITOR
+			string[] result = AssetDatabase.FindAssets(string.Format("t:{0}", typeof(SpriteAsset).FullName));
+
+			if (result.Length > 0 && _unityallAtlases == null)
+			{
+				_unityallAtlases = new List<SpriteAsset>(result.Length);
+				for (int i = 0; i < result.Length; ++i)
+				{
+					string path = AssetDatabase.GUIDToAssetPath(result[i]);
+					SpriteAsset asset = AssetDatabase.LoadAssetAtPath<SpriteAsset>(path);
+					if (asset)
+					{
+						_unityallAtlases.Add(asset);
+					}
+				}
+			}
+			Debug.LogFormat("find :{0} atlas resource", result.Length);
+			Debug.LogWarning("if your asset not in the resources please override InstantiateSpriteAsset");
+#endif
+
+
+			EmojiTools.BeginSample("Emoji_Init");
+			InitRender();
+			EmojiTools.EndSample();
+
+			EmojiTools.BeginSample("Emoji_preLoad");
+			PreLoad();
+			EmojiTools.EndSample();
+
+			RebuildTagList();
+
+			ForceRebuild();
+		}
+
+		void LateUpdate()
+		{
+			EmojiTools.BeginSample("Emoji_LateUpdate");
+			if (_render != null)
+			{
+				_render.LateUpdate();
+			}
+			EmojiTools.EndSample();
+		}
+
+		private void OnDestroy()
+		{
+#if UNITY_EDITOR
+			if (_lostAssets != null)
+			{
+				for (int i = 0; i < _lostAssets.Count; ++i)
+				{
+					string asset = _lostAssets[i];
+					Debug.LogError(string.Format("not prepred atlasAsset named :{0}", asset));
+				}
+			}
+#endif
+			if (_render != null)
+			{
+				_render.Dispose();
+			}
+
+			_render = null;
+			EmojiTools.RemoveUnityMemory(this);
+		}
+
+		protected virtual SpriteAsset InstantiateSpriteAsset(string filepath)
+		{
+			return Resources.Load<SpriteAsset>(filepath);
+		}
+
+		void InitRender()
+		{
+			if (_render == null || _render.renderType != RenderType)
+			{
+
+				if (RenderType == EmojiRenderType.RenderGroup)
+				{
+					EmojiRenderGroup newRender = new EmojiRenderGroup(this);
+					newRender.Speed = AnimationSpeed;
+
+					if (_render != null)
+					{
+						List<InlineText> list = _render.GetAllRenders();
+						if (list != null)
+						{
+							for (int i = 0; i < list.Count; ++i)
+							{
+								InlineText text = list[i];
+								if (text != null)
+									newRender.TryRendering(text);
+							}
+						}
+
+						List<SpriteAsset> atlaslist = _render.GetAllRenderAtlas();
+						if (atlaslist != null)
+						{
+							for (int i = 0; i < atlaslist.Count; ++i)
+							{
+								SpriteAsset atlas = atlaslist[i];
+								if (atlas != null)
+									newRender.PrepareAtlas(atlas);
+							}
+						}
+						_render.Dispose();
+					}
+
+					_render = newRender;
+
+				}
+				else if (RenderType == EmojiRenderType.RenderUnit)
+				{
+					UnitRender newRender = new UnitRender(this);
+					newRender.Speed = AnimationSpeed;
+
+					if (_render != null)
+					{
+						List<InlineText> list = _render.GetAllRenders();
+						if (list != null)
+						{
+							for (int i = 0; i < list.Count; ++i)
+							{
+								InlineText text = list[i];
+								if (text != null)
+									newRender.TryRendering(text);
+							}
+						}
+
+						List<SpriteAsset> atlaslist = _render.GetAllRenderAtlas();
+						if (atlaslist != null)
+						{
+							for (int i = 0; i < atlaslist.Count; ++i)
+							{
+								SpriteAsset atlas = atlaslist[i];
+								if (atlas != null)
+									newRender.PrepareAtlas(atlas);
+							}
+						}
+
+						_render.Dispose();
+					}
+
+					_render = newRender;
+				}
+				else
+				{
+					Debug.LogError("not support yet");
+					this.enabled = false;
+				}
+			}
+		}
+
+		void PreLoad()
+		{
+			for (int i = 0; i < PreparedAtlas.Count; ++i)
+			{
+				string atlasname = PreparedAtlas[i];
+				string fixname = System.IO.Path.GetFileNameWithoutExtension(atlasname);
+				SpriteAsset _spriteAsset = FindAtlas(fixname);
+				PushRenderAtlas(_spriteAsset);
+			}
+		}
+
+		void RebuildTagList()
+		{
+			EmojiTools.BeginSample("Emoji_rebuildTags");
+			_alltags.Clear();
+			_spritemap.Clear();
+#if UNITY_EDITOR && !EMOJI_RUNTIME
+			if (_unityallAtlases != null)
+			{
+				for (int i = 0; i < _unityallAtlases.Count; ++i)
+				{
+					SpriteAsset asset = _unityallAtlases[i];
+					for (int j = 0; j < asset.listSpriteGroup.Count; ++j)
+					{
+						SpriteInfoGroup infogroup = asset.listSpriteGroup[j];
+						SpriteInfoGroup group;
+						if (_alltags.TryGetValue(infogroup.tag, out group))
+						{
+							Debug.LogErrorFormat("already exist :{0} ", infogroup.tag);
+						}
+
+						_alltags[infogroup.tag] = infogroup;
+					}
+				}
+			}
+
+#else
+			for (int i = 0; i < _sharedAtlases.Count; ++i)
+			{
+				SpriteAsset asset = _sharedAtlases[i];
+				for (int j = 0; j < asset.listSpriteGroup.Count; ++j)
+				{
+					SpriteInfoGroup infogroup = asset.listSpriteGroup[j];
+					SpriteInfoGroup group;
+					if (_alltags.TryGetValue(infogroup.tag, out group))
+					{
+						Debug.LogErrorFormat("already exist :{0} ", infogroup.tag);
+					}
+
+					_alltags[infogroup.tag] = infogroup;
+					_spritemap[infogroup.tag] = new KeyValuePair<SpriteAsset, SpriteInfoGroup>(asset, infogroup);
+				}
+			}
+#endif
+			EmojiTools.EndSample();
+		}
+
+		public IEmojiRender Register(InlineText _key)
+		{
+			EmojiTools.BeginSample("Emoji_Register");
+			if (_render != null)
+			{
+				if (_render.TryRendering(_key))
+				{
+					EmojiTools.EndSample();
+					return _render;
+				}
+			}
+			EmojiTools.EndSample();
+			return null;
+		}
+
+
+		/// <summary>
+		/// 移除文本 
+		/// </summary>
+		/// <param name="_id"></param>
+		/// <param name="_key"></param>
+		public void UnRegister(InlineText _key)
+		{
+			EmojiTools.BeginSample("Emoji_UnRegister");
+			if (_render != null)
+			{
+				_render.DisRendering(_key);
+			}
+			EmojiTools.EndSample();
+		}
+
+		public void ForceRebuild()
+		{
+			EmojiTools.BeginSample("Emoji_ForceRebuild");
+			InlineText[] alltexts = GetComponentsInChildren<InlineText>();
+			for (int i = 0; i < alltexts.Length; i++)
+			{
+				alltexts[i].SetVerticesDirty();
+			}
+			EmojiTools.EndSample();
+		}
+
+		/// <summary>
+		/// 清除所有的精灵
+		/// </summary>
+		public void ClearAllSprites()
+		{
+			EmojiTools.BeginSample("Emoji_ClearAll");
+			if (_render != null)
+			{
+				_render.Clear();
+			}
+			EmojiTools.EndSample();
+		}
+
+		public bool isRendering(SpriteAsset _spriteAsset)
+		{
+			return _spriteAsset != null && _render != null && _render.isRendingAtlas(_spriteAsset);
+		}
+
+		public bool CanRendering(string tagName)
+		{
+			return _alltags != null && _alltags.ContainsKey(tagName);
+		}
+
+		public bool CanRendering(int atlasId)
+		{
+
+#if UNITY_EDITOR && !EMOJI_RUNTIME
+			if (_unityallAtlases != null)
+			{
+				for (int i = 0; i < _unityallAtlases.Count; ++i)
+				{
+					SpriteAsset asset = _unityallAtlases[i];
+					if (asset.ID == atlasId)
+					{
+						return true;
+					}
+				}
+			}
+
+			return false;
+#else
+			for (int i = 0; i < _sharedAtlases.Count; ++i)
+			{
+				SpriteAsset asset = _sharedAtlases[i];
+				if (asset.ID == atlasId)
+				{
+					return true;
+				}
+			}
+			return false;
+#endif
+		}
+
+		public void PushRenderAtlas(SpriteAsset _spriteAsset)
+		{
+			EmojiTools.BeginSample("Emoji_PushRenderAtlas");
+			if (!isRendering(_spriteAsset) && _spriteAsset != null)
+			{
+				_render.PrepareAtlas(_spriteAsset);
+
+				if (!_sharedAtlases.Contains(_spriteAsset))
+				{
+					_sharedAtlases.Add(_spriteAsset);
+				}
+			}
+			EmojiTools.EndSample();
+		}
+
+		public SpriteInfoGroup FindSpriteGroup(string TagName, out SpriteAsset resultatlas)
+		{
+			EmojiTools.BeginSample("Emoji_FindSpriteGroup");
+#if UNITY_EDITOR && !EMOJI_RUNTIME
+
+			resultatlas = null;
+			SpriteInfoGroup result = null;
+			if (_unityallAtlases != null)
+			{
+				for (int i = 0; i < _unityallAtlases.Count; ++i)
+				{
+					SpriteAsset asset = _unityallAtlases[i];
+					for (int j = 0; j < asset.listSpriteGroup.Count; ++j)
+					{
+						SpriteInfoGroup group = asset.listSpriteGroup[j];
+						if (group.tag.Equals(TagName))
+						{
+							result = group;
+							resultatlas = asset;
+							break;
+						}
+					}
+				}
+			}
+
+			if (_lostAssets == null)
+				_lostAssets = new List<string>();
+
+			if (resultatlas != null && !PreparedAtlas.Contains(resultatlas.AssetName))
+			{
+				if (!_lostAssets.Contains(resultatlas.AssetName))
+					_lostAssets.Add(resultatlas.AssetName);
+			}
+			EmojiTools.EndSample();
+			return result;
+#else
+			resultatlas = null;
+			SpriteInfoGroup result = null;
+			KeyValuePair<SpriteAsset, SpriteInfoGroup> data;
+			if (_spritemap.TryGetValue(TagName,out data))
+			{
+				result = data.Value;
+				resultatlas = data.Key;
+			}
+			EmojiTools.EndSample();
+			return result;
+#endif
+		}
+
+		public SpriteAsset FindAtlas(int atlasID)
+		{
+			EmojiTools.BeginSample("Emoji_FindAtlas");
+#if UNITY_EDITOR && !EMOJI_RUNTIME
+			SpriteAsset result = null;
+			if (_unityallAtlases != null)
+			{
+				for (int i = 0; i < _unityallAtlases.Count; ++i)
+				{
+					SpriteAsset asset = _unityallAtlases[i];
+					if (asset.ID.Equals(atlasID))
+					{
+						result = asset;
+						break;
+					}
+				}
+			}
+
+			if (_lostAssets == null)
+				_lostAssets = new List<string>();
+
+			if (result != null && !PreparedAtlas.Contains(result.AssetName))
+			{
+				if (!_lostAssets.Contains(result.AssetName))
+					_lostAssets.Add(result.AssetName);
+			}
+			EmojiTools.EndSample();
+			return result;
+#else
+			for (int i = 0; i < _sharedAtlases.Count; ++i)
+			{
+				SpriteAsset asset = _sharedAtlases[i];
+				if (asset.ID.Equals(atlasID))
+				{
+					EmojiTools.EndSample();
+					return asset;
+				}
+			}
+			EmojiTools.EndSample();
+			return null;
+#endif
+		}
+
+
+		public SpriteAsset FindAtlas(string atlasname)
+		{
+			EmojiTools.BeginSample("FindAtlas");
+#if UNITY_EDITOR && !EMOJI_RUNTIME
+			SpriteAsset result = null;
+			if (_unityallAtlases != null)
+			{
+				for (int i = 0; i < _unityallAtlases.Count; ++i)
+				{
+					SpriteAsset asset = _unityallAtlases[i];
+					if (asset.AssetName.Equals(atlasname))
+					{
+						result = asset;
+						break;
+					}
+				}
+			}
+
+			if (_lostAssets == null)
+				_lostAssets = new List<string>();
+
+			if (!PreparedAtlas.Contains(atlasname))
+			{
+				if (!_lostAssets.Contains(atlasname))
+					_lostAssets.Add(atlasname);
+			}
+			EmojiTools.EndSample();
+			return result;
+#else
+			for (int i = 0; i < _sharedAtlases.Count; ++i)
+			{
+				SpriteAsset asset = _sharedAtlases[i];
+				if (asset.AssetName.Equals(atlasname))
+				{
+					EmojiTools.EndSample();
+					return asset;
+				}
+			}
+
+			SpriteAsset newasset = InstantiateSpriteAsset(atlasname);
+			if (newasset != null)
+			{
+				_sharedAtlases.Add(newasset);
+			}
+			EmojiTools.EndSample();
+			return newasset;
+#endif
+
+		}
 	}
-
-	#region 绘制图片
-    private void DrawSprites(int _id)
-    {
-        if (!_IndexSpriteGraphic.ContainsKey(_id)
-            || !_TextMeshInfo.ContainsKey(_id))
-            return;
-
-		SpriteGraphic _spriteGraphic = _IndexSpriteGraphic[_id]._SpriteGraphic;
-        Mesh _mesh = _IndexSpriteGraphic[_id]._Mesh;
-        Dictionary<InlineText, MeshInfo> _data = _TextMeshInfo[_id];
-        List<Vector3> _vertices = new List<Vector3>();
-        List<Vector2> _uv = new List<Vector2>();
-        List<int> _triangles = new List<int>();
-        foreach (var item in _data)
-        {
-			if (item.Key == null)
-				continue;
-
-			for (int i = 0; i < item.Value._Vertices.Length; i++)
-            {
-                //添加顶点
-                _vertices.Add(item.Value._Vertices[i]);
-                //添加uv
-                _uv.Add(item.Value._UV[i]);
-            }
-            //添加顶点索引
-            for (int i = 0; i < item.Value._Triangles.Length; i++)
-                _triangles.Add(item.Value._Triangles[i]);
-        }
-        //计算顶点绘制顺序
-        for (int i = 0; i < _triangles.Count; i++)
-        {
-            if (i % 6 == 0)
-            {
-                int num = i / 6;
-                _triangles[i + 0] = 0 + 4 * num;
-                _triangles[i + 1] = 1 + 4 * num;
-                _triangles[i + 2] = 2 + 4 * num;
-
-                _triangles[i + 3] = 0 + 4 * num;
-                _triangles[i + 4] = 2 + 4 * num;
-                _triangles[i + 5] = 3 + 4 * num;
-            }
-        }
-        _mesh.Clear();
-        _mesh.vertices = _vertices.ToArray();
-        _mesh.uv = _uv.ToArray();
-        _mesh.triangles = _triangles.ToArray();
-
-        _spriteGraphic.canvasRenderer.SetMesh(_mesh);
-        _spriteGraphic.UpdateMaterial();
-    }
-    #endregion
-
-    #region 精灵组信息
-    private class SpriteGraphicInfo
-    {
-        public SpriteGraphic _SpriteGraphic;
-        public Mesh _Mesh;
-    }
-    #endregion
-
-    #region 模型数据信息
-    private class MeshInfo
-    {
-        public string[] _Tag;
-        public Vector3[] _Vertices;
-        public Vector2[] _UV;
-        public int[] _Triangles;
-
-        //比较数据是否一样
-        public bool Equals(MeshInfo _value)
-        {
-            if (_Tag.Length!= _value._Tag.Length|| _Vertices.Length!= _value._Vertices.Length)
-                return false;
-            for (int i = 0; i < _Tag.Length; i++)
-                if (_Tag[i] != _value._Tag[i])
-                    return false;
-            for (int i = 0; i < _Vertices.Length; i++)
-                if (_Vertices[i] != _value._Vertices[i])
-                    return false;
-            return true;
-        }
-    }
-    #endregion
 }
+
+

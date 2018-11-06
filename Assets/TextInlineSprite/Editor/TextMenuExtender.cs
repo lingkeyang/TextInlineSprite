@@ -3,6 +3,7 @@ using System.Collections;
 using UnityEditor;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using EmojiUI;
 
 public class TextMenuExtender
 {

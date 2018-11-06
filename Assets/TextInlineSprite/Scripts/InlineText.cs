@@ -16,433 +16,444 @@ using UnityEngine.EventSystems;
 using UnityEngine.Events;
 using System;
 
-public class InlineText : Text, IPointerClickHandler
+namespace EmojiUI
 {
-    // 用正则取  [图集ID#表情Tag] ID值==-1 ,表示为超链接
-    private static readonly Regex _InputTagRegex = new Regex(@"\[(\-{0,1}\d{0,})#(.+?)\]", RegexOptions.Singleline);
-    //文本表情管理器
-    private InlineManager _InlineManager;
-    //更新后的文本
-    private string _OutputText = "";
-    //表情位置索引信息
-    Dictionary<int, SpriteTagInfo> _SpriteInfo = new Dictionary<int, SpriteTagInfo>();
-    //图集ID，相关信息
-    Dictionary<int, List<SpriteTagInfo>> _DrawSpriteInfo = new Dictionary<int, List<SpriteTagInfo>>();
-	//保留之前的图集ID，相关信息
-	Dictionary<int, List<SpriteTagInfo>> _OldDrawSpriteInfo = new Dictionary<int, List<SpriteTagInfo>>();
-
-	#region 超链接
-	[System.Serializable]
-    public class HrefClickEvent : UnityEvent<string,int> { }
-    //点击事件监听
-    public HrefClickEvent OnHrefClick = new HrefClickEvent();
-    // 超链接信息列表  
-    private readonly List<HrefInfo> _ListHrefInfos = new List<HrefInfo>();
-    #endregion
-
-    ///// <summary>
-    ///// 初始化 
-    ///// </summary>
-    //protected override void OnEnable()
-    //{
-    //    //
-    //    base.OnEnable();
-    //    //支持富文本
-    //    supportRichText = true;
-    //    //对齐几何
-    //    alignByGeometry = true;
-    //    if (!_InlineManager)
-    //        _InlineManager = GetComponentInParent<InlineManager>();
-    //    //启动的是 更新顶点
-    //    SetVerticesDirty();
-    //}
-
-    protected override void Start()
-    {
-        ActiveText();
-    }
-
-#if UNITY_EDITOR
-    protected override void OnValidate()
-    {
-        ActiveText();
-    }
-#endif
-	
-	public void ActiveText()
-    {
-        //支持富文本
-        supportRichText = true;
-        //对齐几何
-        alignByGeometry = true;
-        if (!_InlineManager)
-            _InlineManager = GetComponentInParent<InlineManager>();
-        //启动的是 更新顶点
-        SetVerticesDirty();
-    }
-
-    public override void SetVerticesDirty()
-    {
-        base.SetVerticesDirty();
-        if (!_InlineManager)
-        {
-            _OutputText = m_Text;
-            return;
-        }
-
-        //设置新文本
-        _OutputText = GetOutputText();
-    }
-
-    readonly UIVertex[] m_TempVerts = new UIVertex[4];
-    protected override void OnPopulateMesh(VertexHelper toFill)
-    {
-        if (font == null)
-            return;
-
-        // We don't care if we the font Texture changes while we are doing our Update.
-        // The end result of cachedTextGenerator will be valid for this instance.
-        // Otherwise we can get issues like Case 619238.
-        m_DisableFontTextureRebuiltCallback = true;
-
-        Vector2 extents = rectTransform.rect.size;
-
-        var settings = GetGenerationSettings(extents);
-        //   cachedTextGenerator.PopulateWithErrors(text, settings, gameObject);
-        cachedTextGenerator.Populate(_OutputText, settings);
-
-        // Apply the offset to the vertices
-        IList<UIVertex> verts = cachedTextGenerator.verts;
-        float unitsPerPixel = 1 / pixelsPerUnit;
-        //Last 4 verts are always a new line... (\n)
-        int vertCount = verts.Count - 4;
-        Vector2 roundingOffset = new Vector2(verts[0].position.x, verts[0].position.y) * unitsPerPixel;
-        roundingOffset = PixelAdjustPoint(roundingOffset) - roundingOffset;
-        toFill.Clear();
-
-        ClearQuadUVs(verts);
-
-        List<Vector3> _listVertsPos = new List<Vector3>();
-        if (roundingOffset != Vector2.zero)
-        {
-            for (int i = 0; i < vertCount; ++i)
-            {
-                int tempVertsIndex = i & 3;
-                m_TempVerts[tempVertsIndex] = verts[i];
-                m_TempVerts[tempVertsIndex].position *= unitsPerPixel;
-                m_TempVerts[tempVertsIndex].position.x += roundingOffset.x;
-                m_TempVerts[tempVertsIndex].position.y += roundingOffset.y;
-                if (tempVertsIndex == 3)
-                    toFill.AddUIVertexQuad(m_TempVerts);
-                _listVertsPos.Add(m_TempVerts[tempVertsIndex].position);
-            }
-        }
-        else
-        {
-            for (int i = 0; i < vertCount; ++i)
-            {
-                int tempVertsIndex = i & 3;
-                m_TempVerts[tempVertsIndex] = verts[i];
-                m_TempVerts[tempVertsIndex].position *= unitsPerPixel;
-                if (tempVertsIndex == 3)
-                    toFill.AddUIVertexQuad(m_TempVerts);
-                _listVertsPos.Add(m_TempVerts[tempVertsIndex].position);
-             
-            }
-        }
-
-        //计算quad占位的信息
-        CalcQuadInfo(_listVertsPos);
-        //计算包围盒
-        CalcBoundsInfo(_listVertsPos, toFill, settings);
-
-        m_DisableFontTextureRebuiltCallback = false;
-
-    }
-
-    #region 文本所占的长宽
-    public override float preferredWidth
-    {
-        get
-        {
-            var settings = GetGenerationSettings(Vector2.zero);
-            return cachedTextGeneratorForLayout.GetPreferredWidth(_OutputText, settings) / pixelsPerUnit;
-        }
-    }
-    public override float preferredHeight
-    {
-        get
-        {
-            var settings = GetGenerationSettings(new Vector2(rectTransform.rect.size.x, 0.0f));
-            return cachedTextGeneratorForLayout.GetPreferredHeight(_OutputText, settings) / pixelsPerUnit;
-        }
-    }
-    #endregion
-
-
-    #region 清除乱码
-    private void ClearQuadUVs(IList<UIVertex> verts)
-    {
-        foreach (var item in _SpriteInfo)
-        {
-            if ((item.Key + 4) > verts.Count)
-                continue;
-            for (int i = item.Key; i < item.Key + 4; i++)
-            {
-                //清除乱码
-                UIVertex tempVertex = verts[i];
-                tempVertex.uv0 = Vector2.zero;
-                verts[i] = tempVertex;
-            }
-        }
-    }
-#endregion
-
-    #region 计算Quad占位信息
-    void CalcQuadInfo(List<Vector3> _listVertsPos)
-    {
-        foreach (var item in _SpriteInfo)
-        {
-            if ((item.Key + 4) > _listVertsPos.Count)
-                continue;
-            for (int i = item.Key; i < item.Key + 4; i++)
-            {
-                item.Value._Pos[i - item.Key] = _listVertsPos[i];
-            }
-        }
-        //绘制表情
-        UpdateDrawnSprite();
-    }
-    #endregion
-
-    #region 绘制表情
-    void UpdateDrawnSprite()
-    {
-		//记录之前的信息
-	    _OldDrawSpriteInfo = _DrawSpriteInfo;
-
-		_DrawSpriteInfo = new Dictionary<int, List<SpriteTagInfo>>();
-        foreach (var item in _SpriteInfo)
-        {
-            int _id = item.Value._ID;
-
-            //更新绘制表情的信息
-            List<SpriteTagInfo> _listSpriteInfo = null;
-            if (_DrawSpriteInfo.ContainsKey(_id))
-                _listSpriteInfo = _DrawSpriteInfo[_id];
-            else
-            {
-                _listSpriteInfo = new List<SpriteTagInfo>();
-                _DrawSpriteInfo.Add(_id, _listSpriteInfo);
-            }
-            _listSpriteInfo.Add(item.Value);
-        }
-
-		//没有表情时也要提醒manager删除之前的信息
-	    foreach (var item in _OldDrawSpriteInfo)
-	    {
-		    if(!_DrawSpriteInfo.ContainsKey(item.Key))
-			    _InlineManager.RemoveTextInfo(item.Key,this);
+	public class InlineText : Text
+	{
+		private static StringBuilder _textBuilder = new StringBuilder();
+		private static UIVertex[] m_TempVerts = new UIVertex[4];
+		private static Vector3[] m_TagVerts = new Vector3[2];
+		/// <summary>
+		/// Security usually means additional performance overhead. If you control the bounding box yourself, this calculation may be redundant.
+		/// </summary>
+		public static bool safeMode = true;
+		
+		private InlineManager _InlineManager;
+		//文本表情管理器
+		public InlineManager Manager
+		{
+			get
+			{
+				if (!_InlineManager && canvas != null)
+				{
+					_InlineManager = GetComponentInParent<InlineManager>();
+					if (_InlineManager == null)
+					{
+						_InlineManager = canvas.gameObject.AddComponent<InlineManager>();
+					}
+				}
+				return _InlineManager;
+			}
 		}
 
-	    foreach (var item in _DrawSpriteInfo)
-        {
-            _InlineManager.UpdateTextInfo(item.Key, this, item.Value);
-        }
-    }
+		List<IFillData> _renderTagList;
+		private string _lasttext ;
+		private string _outputText = "";
+		private float? _pw;
 
-    #endregion
+		public override float preferredWidth
+		{
+			get
+			{
+				if (_pw == null)
+				{
+					//its override from uGUI Code ,but has bug?
 
-    #region 处理超链接的包围盒
-    void CalcBoundsInfo(List<Vector3> _listVertsPos, VertexHelper toFill,TextGenerationSettings settings)
-    {
-        #region 包围框
-        // 处理超链接包围框  
-        foreach (var hrefInfo in _ListHrefInfos)
-        {
-            hrefInfo.boxes.Clear();
-            if (hrefInfo.startIndex >= _listVertsPos.Count)
-            {
-                continue;
-            }
+					//var settings = GetGenerationSettings(Vector2.zero);
+					//return cachedTextGeneratorForLayout.GetPreferredWidth(_OutputText, settings) / pixelsPerUnit;
 
-            // 将超链接里面的文本顶点索引坐标加入到包围框  
-            var pos = _listVertsPos[hrefInfo.startIndex];
-            var bounds = new Bounds(pos, Vector3.zero);
-            for (int i = hrefInfo.startIndex, m = hrefInfo.endIndex; i < m; i++)
-            {
-                if (i >= _listVertsPos.Count)
-                {
-                    break;
-                }
+					//next idea
+					Vector2 extents = rectTransform.rect.size;
 
-                pos = _listVertsPos[i];
-                if (pos.x < bounds.min.x)
-                {
-                    // 换行重新添加包围框  
-                    hrefInfo.boxes.Add(new Rect(bounds.min, bounds.size));
-                    bounds = new Bounds(pos, Vector3.zero);
-                }
-                else
-                {
-                    bounds.Encapsulate(pos); // 扩展包围框  
-                }
-            }
-            //添加包围盒
-            hrefInfo.boxes.Add(new Rect(bounds.min, bounds.size));
-        }
-        #endregion
+					var settings = GetGenerationSettings(extents);
+					cachedTextGenerator.Populate(_outputText, settings);
 
-        #region 添加下划线
-        TextGenerator _UnderlineText = new TextGenerator();
-        _UnderlineText.Populate("_", settings);
-        IList<UIVertex> _TUT = _UnderlineText.verts;
-        foreach (var item in _ListHrefInfos)
-        {
-            for (int i = 0; i < item.boxes.Count; i++)
-            {
-                //计算下划线的位置
-                Vector3[] _ulPos = new Vector3[4];
-                _ulPos[0] = item.boxes[i].position + new Vector2(0.0f, fontSize * 0.2f);
-                _ulPos[1] = _ulPos[0]+new Vector3(item.boxes[i].width,0.0f);
-                _ulPos[2] = item.boxes[i].position + new Vector2(item.boxes[i].width, 0.0f);
-                _ulPos[3] =item.boxes[i].position;
-                //绘制下划线
-                for (int j = 0; j < 4; j++)
-                {
-                    m_TempVerts[j] = _TUT[j];
-                    m_TempVerts[j].color = Color.blue;
-                    m_TempVerts[j].position = _ulPos[j];
-                    if (j == 3)
-                        toFill.AddUIVertexQuad(m_TempVerts);
-                }
+					if (cachedTextGenerator.lineCount > 1)
+					{
+						float? minx = null;
+						float? maxx = null;
+						IList<UIVertex> verts = cachedTextGenerator.verts;
+						int maxIndex = cachedTextGenerator.lines[1].startCharIdx;
 
-            }
-        }
+						for (int i = 0, index = 0; i < verts.Count; i += 4, index++)
+						{
+							UIVertex v0 = verts[i];
+							UIVertex v2 = verts[i + 1];
+							float min = v0.position.x;
+							float max = v2.position.x;
 
-        #endregion
+							if (minx.HasValue == false)
+							{
+								minx = min;
+							}
+							else
+							{
+								minx = Mathf.Min(minx.Value, min);
+							}
 
-    }
-    #endregion
+							if (maxx.HasValue == false)
+							{
+								maxx = max;
+							}
+							else
+							{
+								maxx = Mathf.Max(maxx.Value, max);
+							}
 
-    #region 根据正则规则更新文本
-    private string GetOutputText()
-    {
-        _SpriteInfo = new Dictionary<int, SpriteTagInfo>();
-        StringBuilder _textBuilder = new StringBuilder();
-        int _textIndex = 0;
+							if (index > maxIndex)
+							{
+								break;
+							}
+						}
 
-        foreach (Match match in _InputTagRegex.Matches(text))
-        {
-            int _tempID = 0;
-            if (!string.IsNullOrEmpty(match.Groups[1].Value)&& !match.Groups[1].Value.Equals("-"))
-                _tempID = int.Parse(match.Groups[1].Value);
-            string _tempTag = match.Groups[2].Value;
-            //更新超链接
-            if (_tempID <0 )
-            {
-                _textBuilder.Append(text.Substring(_textIndex, match.Index - _textIndex));
-                _textBuilder.Append("<color=blue>");
-                int _startIndex = _textBuilder.Length * 4;
-                _textBuilder.Append("[" + match.Groups[2].Value + "]");
-                int _endIndex = _textBuilder.Length * 4 - 2;
-                _textBuilder.Append("</color>");
+						_pw = (maxx - minx);
+					}
+					else
+					{
+						//_pw = cachedTextGeneratorForLayout.GetPreferredWidth(_OutputText, settings) / pixelsPerUnit;
+						float? minx = null;
+						float? maxx = null;
+						IList<UIVertex> verts = cachedTextGenerator.verts;
+						int maxIndex = cachedTextGenerator.characterCount;
 
-                var hrefInfo = new HrefInfo
-                {
-                    id = Mathf.Abs(_tempID),
-                    startIndex = _startIndex, // 超链接里的文本起始顶点索引
-                    endIndex = _endIndex,
-                    name = match.Groups[2].Value
-                };
-                _ListHrefInfos.Add(hrefInfo);
+						for (int i = 0, index = 0; i < verts.Count; i += 4, index++)
+						{
+							UIVertex v0 = verts[i];
+							UIVertex v2 = verts[i + 1];
+							float min = v0.position.x;
+							float max = v2.position.x;
 
-            }
-            //更新表情
-            else
-            {
-                if (!_InlineManager._IndexSpriteInfo.ContainsKey(_tempID)
-                    || !_InlineManager._IndexSpriteInfo[_tempID].ContainsKey(_tempTag))
-                    continue;
-                SpriteInforGroup _tempGroup = _InlineManager._IndexSpriteInfo[_tempID][_tempTag];
+							if (minx.HasValue == false)
+							{
+								minx = min;
+							}
+							else
+							{
+								minx = Mathf.Min(minx.Value, min);
+							}
 
-                _textBuilder.Append(text.Substring(_textIndex, match.Index - _textIndex));
-                int _tempIndex = _textBuilder.Length * 4;
-                _textBuilder.Append(@"<quad size=" + _tempGroup.size + " width=" + _tempGroup.width + " />");
+							if (maxx.HasValue == false)
+							{
+								maxx = max;
+							}
+							else
+							{
+								maxx = Mathf.Max(maxx.Value, max);
+							}
 
-                SpriteTagInfo _tempSpriteTag = new SpriteTagInfo
-                {
-                    _ID = _tempID,
-                    _Tag = _tempTag,
-                    _Size = new Vector2(_tempGroup.size * _tempGroup.width, _tempGroup.size),
-                    _Pos = new Vector3[4],
-                    _UV = _tempGroup.listSpriteInfor[0].uv
-                };
-                if (!_SpriteInfo.ContainsKey(_tempIndex))
-                    _SpriteInfo.Add(_tempIndex, _tempSpriteTag);
-            }
+							if (index > maxIndex)
+							{
+								break;
+							}
+						}
 
-            _textIndex = match.Index + match.Length;
-        }
+						_pw = (maxx - minx);
+					}
 
-        _textBuilder.Append(text.Substring(_textIndex, text.Length - _textIndex));
-        return _textBuilder.ToString();
-    }
-    #endregion
+				}
+				return _pw.Value;
+			}
+		}
 
-    #region  超链接信息类
-    private class HrefInfo
-    {
-        public int id;
+		public override float preferredHeight
+		{
+			get
+			{
+				var settings = GetGenerationSettings(new Vector2(GetPixelAdjustedRect().size.x, 0.0f));
+				return cachedTextGeneratorForLayout.GetPreferredHeight(_outputText, settings) / pixelsPerUnit;
+			}
+		}
 
-        public int startIndex;
+		void OnDrawGizmos()
+		{
+			Gizmos.color = Color.blue;
 
-        public int endIndex;
+			var corners = new Vector3[4];
+			rectTransform.GetWorldCorners(corners);
 
-        public string name;
+			Gizmos.DrawLine(corners[0], corners[1]);
+			Gizmos.DrawLine(corners[1], corners[2]);
+			Gizmos.DrawLine(corners[3], corners[3]);
+			Gizmos.DrawLine(corners[3], corners[0]);
+		}
 
-        public readonly List<Rect> boxes = new List<Rect>();
-    }
-    #endregion
+		protected override void Start()
+		{
+			base.Start();
+
+			EmojiTools.AddUnityMemory(this);
+		}
+
+		public override void SetVerticesDirty()
+		{
+			base.SetVerticesDirty();
+			if (Application.isPlaying && this.isActiveAndEnabled)
+			{
+				if (!Manager)
+				{
+					_outputText = m_Text;
+				}
+				else if(Manager.HasInit)
+				{
+					DoUpdateEmoji();
+				}
+				else
+				{
+					StartCoroutine(WaitManagerInited());
+				}
+			}
+			else
+			{
+				_outputText = m_Text;
+			}
+		}
+
+		IEnumerator WaitManagerInited()
+		{
+			while (Manager != null && !Manager.HasInit)
+			{
+				yield return null;
+			}
+
+			DoUpdateEmoji();
+		}
+
+		void DoUpdateEmoji()
+		{
+			if(m_Text != null && !m_Text.Equals(_lasttext) )
+			{
+				ClearFillData();
+				_lasttext = m_Text;
+				ParserTransmit.mIns.DoParse(this, _textBuilder, m_Text);
+
+				_outputText = _textBuilder.ToString();
+				_textBuilder.Length = 0;
+			}	
+		}
+
+		protected override void OnDestroy()
+		{
+			base.OnDestroy();
+
+			if (_renderTagList != null)
+			{
+				ListPool<IFillData>.Release(_renderTagList);
+				_renderTagList = null;
+			}
+
+			if (Manager)
+			{
+				Manager.UnRegister(this);
+			}
+
+			EmojiTools.RemoveUnityMemory(this);
+		}
+
+		protected override void OnPopulateMesh(VertexHelper toFill)
+		{
+			if (font == null)
+				return;
+
+			// We don't care if we the font Texture changes while we are doing our Update.
+			// The end result of cachedTextGenerator will be valid for this instance.
+			// Otherwise we can get issues like Case 619238.
+			m_DisableFontTextureRebuiltCallback = true;
+
+			Vector2 extents = rectTransform.rect.size;
+
+			var settings = GetGenerationSettings(extents);
+			cachedTextGenerator.PopulateWithErrors(_outputText, settings, gameObject);
+
+			// Apply the offset to the vertices
+			IList<UIVertex> verts = cachedTextGenerator.verts;
+			float unitsPerPixel = 1 / pixelsPerUnit;
+			//Last 4 verts are always a new line... (\n)
+			int vertCount = verts.Count - 4;
+			Vector2 roundingOffset = new Vector2(verts[0].position.x, verts[0].position.y) * unitsPerPixel;
+			roundingOffset = PixelAdjustPoint(roundingOffset) - roundingOffset;
+			toFill.Clear();
+
+			int nextfilldata = -1;
+			int fillindex = -1;
+			int startfilldata = -1;
+			
+			if (_renderTagList != null && _renderTagList.Count  >0)
+			{
+				var data = _renderTagList[0];
+				nextfilldata = data.GetPositionIdx() ;
+				//at least one 
+				startfilldata = nextfilldata - (data.GetFillCnt()-1) * 4-3;
+				fillindex = 0;
+
+				Manager.Register(this);
+			}
+			else
+			{
+				Manager.UnRegister(this);
+			}
+			
+			if (roundingOffset != Vector2.zero)
+			{
+				for (int i = 0; i < vertCount; ++i)
+				{
+					int tempVertsIndex = i & 3;
+					m_TempVerts[tempVertsIndex] = verts[i];
+					m_TempVerts[tempVertsIndex].position *= unitsPerPixel;
+					m_TempVerts[tempVertsIndex].position.x += roundingOffset.x;
+					m_TempVerts[tempVertsIndex].position.y += roundingOffset.y;
+
+					//first
+					if (startfilldata >= 0 && i == startfilldata)
+					{
+						m_TagVerts[0]= m_TempVerts[tempVertsIndex].position;
+					}
+
+					//third
+					if (nextfilldata >= 0 && i == nextfilldata - 1)
+					{
+						m_TagVerts[1] = m_TempVerts[tempVertsIndex].position;
+					}
+
+					if (tempVertsIndex == 3)
+					{
+						//skip
+						if ( i < startfilldata || i > nextfilldata )
+						{
+							toFill.AddUIVertexQuad(m_TempVerts);
+						}
+
+						if (nextfilldata >=0 && i >= nextfilldata)
+						{
+							FillNextTag(ref startfilldata,ref nextfilldata,ref fillindex);
+						}
+					}
+				}
+			}
+			else
+			{
+				for (int i = 0; i < vertCount; ++i)
+				{
+					int tempVertsIndex = i & 3;
+					m_TempVerts[tempVertsIndex] = verts[i];
+					m_TempVerts[tempVertsIndex].position *= unitsPerPixel;
+
+					//first
+					if (startfilldata >= 0 && i == startfilldata)
+					{
+						m_TagVerts[0] = m_TempVerts[tempVertsIndex].position;
+					}
+
+					//third
+					if (nextfilldata >= 0 && i == nextfilldata - 1)
+					{
+						m_TagVerts[1] = m_TempVerts[tempVertsIndex].position;
+					}
+
+					if (tempVertsIndex == 3)
+					{
+						//skip
+						if ( startfilldata == -1 || (startfilldata >=0 && i < startfilldata) ||  (nextfilldata >= 0 &&  i > nextfilldata ))
+						{
+							toFill.AddUIVertexQuad(m_TempVerts);
+						}
+
+						if (nextfilldata >=0 && i >= nextfilldata)
+						{
+							FillNextTag(ref startfilldata,ref nextfilldata,ref fillindex);
+						}
+					}
+				}
+			}
+
+			m_DisableFontTextureRebuiltCallback = false;
+			//
+
+			if(safeMode)
+			{
+				CalBoundsInSafe();
+			}
+
+		}
+
+		void CalBoundsInSafe()
+		{
+			if(_renderTagList != null && _renderTagList.Count>0)
+			{
+				Rect rect = rectTransform.rect;
+				for (int i = _renderTagList.Count - 1; i >= 0; i--)
+				{
+					IFillData data = _renderTagList[i];
+					if (rect.Contains(data.pos[1]) && rect.Contains(data.pos[3]))
+					{
+						data.ignore = false;
+					}
+					else
+					{
+						data.ignore = true;
+					}
+				}
+			}
+		}
+
+		void FillNextTag(ref int startfilldata,ref int nextfilldata,ref int fillindex)
+		{
+			if(_renderTagList != null && fillindex >=0)
+			{
+				//fill current
+				var current = _renderTagList[fillindex];
+				current.Fill(m_TagVerts[0],m_TagVerts[1]);
+
+				fillindex++;
+				if (fillindex < _renderTagList.Count)
+				{
+					//update next
+					var data = _renderTagList[fillindex];
+					nextfilldata = data.GetPositionIdx();
+					startfilldata = nextfilldata - (data.GetFillCnt() - 1) * 4 - 3;
+				}
+				else
+				{
+					startfilldata = -1;
+					nextfilldata = -1;
+					fillindex = -1;
+				}
+			}
+		}
 
 
+		internal List<IFillData> PopEmojiData()
+		{
+			return _renderTagList;
+		}
 
-    #region 点击事件检测是否点击到超链接文本  
-    public void OnPointerClick(PointerEventData eventData)
-    {
-        Vector2 lp;
-        RectTransformUtility.ScreenPointToLocalPointInRectangle(
-            rectTransform, eventData.position, eventData.pressEventCamera, out lp);
+		void ClearFillData()
+		{
+			if(_renderTagList != null)
+			{
+				_renderTagList.Clear();
+			}
+		}
 
-        foreach (var hrefInfo in _ListHrefInfos)
-        {
-            var boxes = hrefInfo.boxes;
-            for (var i = 0; i < boxes.Count; ++i)
-            {
-                if (boxes[i].Contains(lp))
-                {
-                    OnHrefClick.Invoke(hrefInfo.name, hrefInfo.id);
-                    return;
-                }
-            }
-        }
-    }
-    #endregion
+		internal void AddFillData(IFillData data)
+		{
+			if(_renderTagList == null)
+			{
+				_renderTagList = ListPool<IFillData>.Get();
+			}
+			this._renderTagList.Add(data);
+		}
 
+		internal void RemoveFillData(IFillData data)
+		{
+			if(_renderTagList != null)
+			{
+				_renderTagList.Remove(data);
+			}
+		}	
+	}
 }
 
-public class SpriteTagInfo
-{
-    //图集ID
-    public int _ID;
-    //标签标签
-    public string _Tag;
-    //标签大小
-    public Vector2 _Size;
-    //表情位置
-    public Vector3[] _Pos;
-    //uv
-    public Vector2[] _UV;
-}
+
+
 
 
